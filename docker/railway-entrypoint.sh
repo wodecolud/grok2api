@@ -2,7 +2,9 @@
 set -eu
 umask 077
 
-mkdir -p /run/grok2api /app/data
+mkdir -p /run/grok2api /app/data /app/data/media
+chown -R grok2api:grok2api /app/data /run/grok2api
+chmod 750 /app/data
 
 cat > /run/grok2api/config.yaml <<EOF
 server:
