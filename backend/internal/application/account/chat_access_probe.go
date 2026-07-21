@@ -33,8 +33,12 @@ type ChatAccessProbeReport struct {
 // ProbeBuildChatAccessAndDelete 通过上游 chat 代理（含出口代理）探测 Build 账号。
 // 命中 chat 端点 403/permission-denied 时直接删除该 Grok Build 账号。
 //
-// 并发复用账号服务的 runAccountBatch + syncPool（与 Billing/额度批量同步同一套有界线程池；
-// 生产环境默认 Batch.SyncConcurrency=25，并受 bulk 全局上限约束）。
+// 多线程说明（复用现有批量流程，不单独造轮子）：
+//  1. 与 Billing/额度批量同步相同：runAccountBatch → batch.MapObserved 多 worker
+//  2. 并发池使用 syncPool（SetTaskPools 注入；生产默认 Batch.SyncConcurrency=25）
+//  3. 再受 bulk 全局上游池限制，并应用 Batch.RandomDelay jitter，避免打爆代理/上游
+//  4. 单项失败不中断其他账号；进度回调与 refresh-billing 等 SSE 批量任务一致
+//  5. 调大并发：设置 Batch.SyncConcurrency（1–50）
 func (s *Service) ProbeBuildChatAccessAndDelete(ctx context.Context, ids []uint64, progress BatchProgressObserver) (ChatAccessProbeReport, error) {
 	if s.providers == nil {
 		return ChatAccessProbeReport{}, fmt.Errorf("Provider 注册表未初始化")
