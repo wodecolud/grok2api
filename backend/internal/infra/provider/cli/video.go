@@ -351,13 +351,12 @@ func (a *Adapter) pollVideoJob(ctx context.Context, credential account.Credentia
 }
 
 func (a *Adapter) doVideoJSON(ctx context.Context, credential account.Credential, accessToken, method, base, path string, body []byte, profile videoRequestProfile, withTrace bool) ([]byte, error) {
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = bytes.NewReader(body)
-	}
 	requestCtx := infraegress.WithCredential(ctx, credential)
-	req, err := http.NewRequestWithContext(requestCtx, method, a.urlWithBase(base, path), bodyReader)
+	req, err := http.NewRequestWithContext(requestCtx, method, a.urlWithBase(base, path), nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := attachReplayableBody(req, body); err != nil {
 		return nil, err
 	}
 	if err := a.applyHeaders(req, credential, accessToken, profile.model, "", withTrace); err != nil {

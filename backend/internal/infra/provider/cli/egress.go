@@ -13,6 +13,16 @@ import (
 // cliIdentityTransport is the final shared transport boundary for Grok Build.
 // It injects CLI OAuth identity for cli-chat-proxy.grok.com before any egress
 // or default RoundTripper runs, and never mutates api.x.ai requests.
+
+// wrapBuildOutboundTransport builds the shared outbound chain:
+// identity (CLI headers) -> access-denied api.x.ai fallback -> next.
+func wrapBuildOutboundTransport(next http.RoundTripper) http.RoundTripper {
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	return &cliIdentityTransport{next: &grokAccessDeniedFallbackTransport{base: next}}
+}
+
 type cliIdentityTransport struct {
 	next http.RoundTripper
 }

@@ -59,15 +59,13 @@ type Adapter struct {
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	// Identity transport is the shared final boundary: CLI proxy requests always
-	// carry X-XAI-Token-Auth even if a future call site skips applyHeaders.
-	identity := &cliIdentityTransport{next: transport}
-	httpClient := &http.Client{Transport: identity}
+	// Shared outbound chain: CLI identity headers + permission-denied api.x.ai fallback.
+	httpClient := &http.Client{Transport: wrapBuildOutboundTransport(transport)}
 	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
 	// 进程生成一个随机 UUID，在进程生命周期内作为统一 Agent 身份。
 	agentID := uuid.NewString()
 	return &Adapter{
-		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: identity,
+		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
 		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
 }
@@ -80,7 +78,9 @@ func (a *Adapter) SetLogger(logger *slog.Logger) {
 
 func (a *Adapter) SetEgress(manager *infraegress.Manager) {
 	if manager != nil {
-		a.http.Transport = &egressTransport{manager: manager, fallback: a.base}
+		// Keep identity + access-denied fallback outside egress so every Build
+		// request still gets CLI headers and the api.x.ai compatibility retry.
+		a.http.Transport = wrapBuildOutboundTransport(&egressTransport{manager: manager, fallback: a.base})
 	}
 }
 
@@ -347,13 +347,12 @@ func isCompactPath(path string) bool {
 }
 
 func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (*http.Response, string, error) {
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = bytes.NewReader(body)
-	}
 	requestCtx := infraegress.WithCredential(ctx, request.Credential)
-	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(base, request.Path), bodyReader)
+	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(base, request.Path), nil)
 	if err != nil {
+		return nil, "", err
+	}
+	if err := attachReplayableBody(req, body); err != nil {
 		return nil, "", err
 	}
 	if err := a.applyHeaders(req, request.Credential, accessToken, request.Model, request.PromptCacheKey, true); err != nil {
@@ -496,6 +495,7 @@ func (a *Adapter) listModelsAt(ctx context.Context, credential account.Credentia
 	if err != nil {
 		return nil, 0, err
 	}
+	_ = attachReplayableBody(req, nil)
 	if err := a.applyHeaders(req, credential, accessToken, "", "", false); err != nil {
 		return nil, 0, err
 	}
@@ -786,6 +786,7 @@ func (a *Adapter) getBilling(ctx context.Context, credential account.Credential,
 	if err != nil {
 		return account.Billing{}, err
 	}
+	_ = attachReplayableBody(req, nil)
 	if err := a.applyHeaders(req, credential, accessToken, "", "", false); err != nil {
 		return account.Billing{}, err
 	}
@@ -815,6 +816,7 @@ func (a *Adapter) getSubscriptionTier(ctx context.Context, credential account.Cr
 	if err != nil {
 		return "", err
 	}
+	_ = attachReplayableBody(req, nil)
 	if err := a.applyHeaders(req, credential, accessToken, "", "", false); err != nil {
 		return "", err
 	}
