@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 )
 
 func TestIsChatAccessDeniedStatus(t *testing.T) {
@@ -124,4 +126,117 @@ func (a *chatProbeAdapter) ForwardResponse(_ context.Context, request provider.R
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_ok","status":"completed"}`)),
 	}, nil
+}
+
+func TestProbeBuildChatAccessRunsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "chat-probe-concurrent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]uint64, 0, 8)
+	for i := 0; i < 8; i++ {
+		token, encryptErr := cipher.Encrypt("token-" + itoa(i))
+		if encryptErr != nil {
+			t.Fatal(encryptErr)
+		}
+		name := "probe-" + itoa(i)
+		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, accountdomain.Credential{
+			Provider: accountdomain.ProviderBuild, Name: name, SourceKey: name,
+			EncryptedAccessToken: token, ExpiresAt: time.Now().Add(time.Hour),
+			Enabled: true, AuthStatus: accountdomain.AuthStatusActive, Priority: 100 - i, MaxConcurrent: 1,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		ids = append(ids, credential.ID)
+	}
+	adapter := &concurrentChatProbeAdapter{reached: make(chan struct{}), release: make(chan struct{})}
+	service := NewService(accountRepo, nil, nil, memory.NewStickyStore(), provider.NewRegistry(adapter), cipher, nil)
+	// Match production bulk sync defaults: multi-worker shared pool.
+	service.SetTaskPools(nil, batchNewPool(4), nil)
+
+	done := make(chan ChatAccessProbeReport, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		report, probeErr := service.ProbeBuildChatAccessAndDelete(ctx, ids, nil)
+		if probeErr != nil {
+			errCh <- probeErr
+			return
+		}
+		done <- report
+	}()
+
+	select {
+	case <-adapter.reached:
+		// At least 2 probes overlapped before any response returned.
+	case err := <-errCh:
+		t.Fatalf("probe failed before concurrency barrier: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("probes did not overlap; batch path appears serial")
+	}
+	close(adapter.release)
+
+	select {
+	case report := <-done:
+		if report.Checked != 8 || report.Failed != 0 || report.Workers != 4 {
+			t.Fatalf("report = %#v", report)
+		}
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe did not finish")
+	}
+	if peak := adapter.peak.Load(); peak < 2 {
+		t.Fatalf("peak concurrency = %d, want >= 2", peak)
+	}
+}
+
+type concurrentChatProbeAdapter struct {
+	active  atomic.Int64
+	peak    atomic.Int64
+	reached chan struct{}
+	once    sync.Once
+	release chan struct{}
+}
+
+func (a *concurrentChatProbeAdapter) Provider() accountdomain.Provider { return accountdomain.ProviderBuild }
+func (a *concurrentChatProbeAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider: accountdomain.ProviderBuild, ModelNamespace: accountdomain.ProviderBuild.ModelNamespace(),
+		Credential:   provider.CredentialSurface{AuthType: accountdomain.AuthTypeOAuth, Refresh: true},
+		Conversation: provider.ConversationSurface{Responses: true},
+		Quota:        provider.QuotaBilling,
+	}
+}
+func (a *concurrentChatProbeAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+	current := a.active.Add(1)
+	for {
+		peak := a.peak.Load()
+		if current <= peak || a.peak.CompareAndSwap(peak, current) {
+			break
+		}
+	}
+	if current >= 2 {
+		a.once.Do(func() { close(a.reached) })
+	}
+	<-a.release
+	a.active.Add(-1)
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"id":"resp_ok","status":"completed"}`)),
+	}, nil
+}
+
+func batchNewPool(limit int) *batch.Pool {
+	return batch.NewPool(limit)
 }

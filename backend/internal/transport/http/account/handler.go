@@ -204,6 +204,7 @@ type chatAccessProbeResponse struct {
 	Deleted int `json:"deleted"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+	Workers int `json:"workers"`
 }
 
 type buildConversionRequest struct {
@@ -507,7 +508,7 @@ func (h *Handler) probeBuildChatAccess(c *gin.Context) {
 		stream.WriteError("buildChatProbeFailed", "检测 Grok Build chat 访问失败")
 		return
 	}
-	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped})
+	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped, Workers: report.Workers})
 }
 
 // batchProbeBuildChatAccess 仅检测选中的 Grok Build 账号；chat 403 直接删除。
@@ -536,7 +537,7 @@ func (h *Handler) batchProbeBuildChatAccess(c *gin.Context) {
 		stream.WriteError("buildChatProbeFailed", "检测 Grok Build chat 访问失败")
 		return
 	}
-	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped})
+	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped, Workers: report.Workers})
 }
 
 func (h *Handler) batchRefreshQuotas(c *gin.Context) {

@@ -27,10 +27,14 @@ type ChatAccessProbeReport struct {
 	Deleted int `json:"deleted"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+	Workers int `json:"workers"`
 }
 
 // ProbeBuildChatAccessAndDelete 通过上游 chat 代理（含出口代理）探测 Build 账号。
 // 命中 chat 端点 403/permission-denied 时直接删除该 Grok Build 账号。
+//
+// 并发复用账号服务的 runAccountBatch + syncPool（与 Billing/额度批量同步同一套有界线程池；
+// 生产环境默认 Batch.SyncConcurrency=25，并受 bulk 全局上限约束）。
 func (s *Service) ProbeBuildChatAccessAndDelete(ctx context.Context, ids []uint64, progress BatchProgressObserver) (ChatAccessProbeReport, error) {
 	if s.providers == nil {
 		return ChatAccessProbeReport{}, fmt.Errorf("Provider 注册表未初始化")
@@ -43,8 +47,18 @@ func (s *Service) ProbeBuildChatAccessAndDelete(ctx context.Context, ids []uint6
 	if err != nil {
 		return ChatAccessProbeReport{}, err
 	}
-	report := ChatAccessProbeReport{Skipped: skipped}
-	if len(values) == 0 {
+	return s.probeBuildChatAccessAccounts(ctx, values, skipped, progress)
+}
+
+// probeBuildChatAccessAccounts 与 refreshBillings/BatchRefreshQuota 一样走 runAccountBatch 多 worker 并发。
+func (s *Service) probeBuildChatAccessAccounts(ctx context.Context, ids []uint64, skipped int, progress BatchProgressObserver) (ChatAccessProbeReport, error) {
+	pool := s.syncPool
+	workers := 0
+	if pool != nil {
+		workers = pool.Limit()
+	}
+	report := ChatAccessProbeReport{Skipped: skipped, Workers: workers}
+	if len(ids) == 0 {
 		if progress != nil {
 			_ = progress(0, 0)
 		}
@@ -52,7 +66,8 @@ func (s *Service) ProbeBuildChatAccessAndDelete(ctx context.Context, ids []uint6
 	}
 
 	var deleted atomic.Int64
-	succeeded, failed, batchErr := s.runAccountBatch(ctx, "build_chat_access_probe", values, s.syncPool, progress, func(workCtx context.Context, id uint64) error {
+	// 与额度同步相同：batch.MapObserved 启多 worker，再经 syncPool 做有界并发。
+	succeeded, failed, batchErr := s.runAccountBatch(ctx, "build_chat_access_probe", ids, pool, progress, func(workCtx context.Context, id uint64) error {
 		removed, probeErr := s.probeBuildChatAccessAndDeleteOne(workCtx, id)
 		if probeErr != nil {
 			return probeErr
