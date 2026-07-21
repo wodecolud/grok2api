@@ -264,6 +264,7 @@ export function enableWebAccountNSFW(id: string): Promise<{ completed: boolean }
 
 export type AccountBatchResultDTO = { succeeded: number; failed: number };
 export type AccountTokenRefreshResultDTO = AccountBatchResultDTO & { skipped: number };
+export type ChatAccessProbeResultDTO = { checked: number; deleted: number; failed: number; skipped: number };
 
 export type BuildConversionResultDTO = {
   created: number;
@@ -311,13 +312,13 @@ export type AccountImportResultDTO = {
 
 export type WebConsoleSyncResultDTO = AccountImportResultDTO & { skipped: number };
 
-type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO> & {
+type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO & ChatAccessProbeResultDTO> & {
   code?: string;
   message?: string;
 };
 
 const decodeAccountTaskStreamPayload = createObjectDecoder<AccountTaskStreamPayload>("account task event", {
-  created: isOptional(isNumber), linked: isOptional(isNumber), skipped: isOptional(isNumber), failed: isOptional(isNumber),
+  created: isOptional(isNumber), linked: isOptional(isNumber), skipped: isOptional(isNumber), failed: isOptional(isNumber), checked: isOptional(isNumber), deleted: isOptional(isNumber),
   synced: isOptional(isNumber), syncFailed: isOptional(isNumber), completed: isOptional(isNumber), total: isOptional(isNumber),
   phase: isOptional(isOneOf("importing", "converting", "syncing")), updated: isOptional(isNumber), succeeded: isOptional(isNumber),
   code: isOptional(isString), message: isOptional(isString),
@@ -462,6 +463,15 @@ export function refreshAccountsTokens(ids: string[], provider: AccountProvider):
 export function cleanupAccounts(provider: AccountProvider, statuses: AccountCleanupStatus[]): Promise<{ deleted: number }> {
   return apiRequest("/api/admin/v1/accounts/cleanup", { method: "POST", body: { provider, statuses } }, decodeCountResult<{ deleted: number }>("deleted"));
 }
+
+export function probeBuildChatAccess(onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<ChatAccessProbeResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/build/probe-chat-access", undefined, ["checked", "deleted", "failed", "skipped"], onProgress, signal);
+}
+
+export function probeSelectedBuildChatAccess(ids: string[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<ChatAccessProbeResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/probe-chat-access", { ids }, ["checked", "deleted", "failed", "skipped"], onProgress, signal);
+}
+
 
 export function deleteAccounts(ids: string[], provider: AccountProvider): Promise<{ deleted: number }> {
   return apiRequest("/api/admin/v1/accounts", { method: "DELETE", body: { ids, provider } }, decodeCountResult<{ deleted: number }>("deleted"));

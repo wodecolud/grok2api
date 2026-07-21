@@ -150,6 +150,8 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/refresh-billing", h.refreshAllBilling)
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/cleanup", h.cleanup)
+	router.POST("/accounts/build/probe-chat-access", h.probeBuildChatAccess)
+	router.POST("/accounts/batch/probe-chat-access", h.batchProbeBuildChatAccess)
 	router.POST("/accounts/batch/refresh-billing", h.batchRefreshBilling)
 	router.POST("/accounts/batch/refresh-quotas", h.batchRefreshQuotas)
 	router.POST("/accounts/batch/refresh-tokens", h.batchRefreshTokens)
@@ -191,6 +193,17 @@ type batchDeleteRequest struct {
 type accountCleanupRequest struct {
 	Provider string                     `json:"provider" binding:"required"`
 	Statuses []accountapp.CleanupStatus `json:"statuses" binding:"required"`
+}
+
+type probeBuildChatAccessRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type chatAccessProbeResponse struct {
+	Checked int `json:"checked"`
+	Deleted int `json:"deleted"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
 }
 
 type buildConversionRequest struct {
@@ -483,6 +496,47 @@ func (h *Handler) cleanup(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
+}
+
+// probeBuildChatAccess 扫描全部启用中的 Grok Build 账号；chat 403 直接删除。
+func (h *Handler) probeBuildChatAccess(c *gin.Context) {
+	stream := newAccountEventStream(c)
+	defer stream.Close()
+	report, err := h.service.ProbeBuildChatAccessAndDelete(c.Request.Context(), nil, stream.ProgressObserver())
+	if err != nil {
+		stream.WriteError("buildChatProbeFailed", "检测 Grok Build chat 访问失败")
+		return
+	}
+	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped})
+}
+
+// batchProbeBuildChatAccess 仅检测选中的 Grok Build 账号；chat 403 直接删除。
+func (h *Handler) batchProbeBuildChatAccess(c *gin.Context) {
+	var request probeBuildChatAccessRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	ids, err := parseIDs(request.IDs)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+		return
+	}
+	if len(ids) == 0 {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请选择要检测的账号")
+		return
+	}
+	if !h.validateProviderIDs(c, ids, string(accountdomain.ProviderBuild)) {
+		return
+	}
+	stream := newAccountEventStream(c)
+	defer stream.Close()
+	report, err := h.service.ProbeBuildChatAccessAndDelete(c.Request.Context(), ids, stream.ProgressObserver())
+	if err != nil {
+		stream.WriteError("buildChatProbeFailed", "检测 Grok Build chat 访问失败")
+		return
+	}
+	_ = stream.Write("complete", chatAccessProbeResponse{Checked: report.Checked, Deleted: report.Deleted, Failed: report.Failed, Skipped: report.Skipped})
 }
 
 func (h *Handler) batchRefreshQuotas(c *gin.Context) {

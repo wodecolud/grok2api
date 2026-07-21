@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
+import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCw, Search, ShieldAlert, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -36,6 +36,8 @@ import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/tabl
 import {
   acceptWebAccountTerms,
   cleanupAccounts,
+  probeBuildChatAccess,
+  probeSelectedBuildChatAccess,
   deleteAccount,
   deleteAccounts,
   enableWebAccountNSFW,
@@ -108,6 +110,7 @@ export function AccountsPage() {
   const webConsoleSyncAbortRef = useRef<AbortController | null>(null);
   const webAccountScriptsAbortRef = useRef<AbortController | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
+  const chatProbeAbortRef = useRef<AbortController | null>(null);
   const importToastRef = useRef<string | number | null>(null);
   const [provider, setProvider] = useState<AccountProvider>("grok_build");
   const [page, setPage] = useState(1);
@@ -122,6 +125,9 @@ export function AccountsPage() {
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupStatuses, setCleanupStatuses] = useState<Set<AccountCleanupStatus>>(() => new Set());
+  const [chatProbeOpen, setChatProbeOpen] = useState(false);
+  const [chatProbeScope, setChatProbeScope] = useState<"all" | "selected">("all");
+  const [chatProbeProgress, setChatProbeProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -151,6 +157,7 @@ export function AccountsPage() {
     webConsoleSyncAbortRef.current?.abort();
     webAccountScriptsAbortRef.current?.abort();
     importAbortRef.current?.abort();
+    chatProbeAbortRef.current?.abort();
     if (importToastRef.current !== null) toast.dismiss(importToastRef.current);
   }, []);
 
@@ -480,6 +487,29 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const chatProbeMutation = useMutation({
+    mutationFn: (scope: "all" | "selected") => {
+      const controller = new AbortController();
+      chatProbeAbortRef.current = controller;
+      setChatProbeProgress(null);
+      if (scope === "selected") {
+        return probeSelectedBuildChatAccess([...selected], setChatProbeProgress, controller.signal);
+      }
+      return probeBuildChatAccess(setChatProbeProgress, controller.signal);
+    },
+    onSuccess: (result) => {
+      setChatProbeOpen(false);
+      clearSelection();
+      toast.success(t("accounts.chatProbeCompleted", result));
+    },
+    onError: (error) => { if (!isAbortError(error)) showError(error); },
+    onSettled: () => {
+      chatProbeAbortRef.current = null;
+      setChatProbeProgress(null);
+      invalidateAccountData();
+    },
+  });
+
   useEffect(() => {
     if (!deviceOpen || !deviceSession || deviceStatus !== "pending") {
       return;
@@ -685,6 +715,7 @@ export function AccountsPage() {
     || batchTokenMutation.isPending
     || batchDeleteMutation.isPending
     || cleanupMutation.isPending
+    || chatProbeMutation.isPending
     || webConfirmationMutation.isPending
     || webAccountScriptsMutation.isPending;
 
@@ -806,6 +837,7 @@ export function AccountsPage() {
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchBillingMutation.mutate()}>{t("accountCredential.quotaSyncAction")}</Button>
                 {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchTokenMutation.mutate()}>{t("accountCredential.refreshAction")}</Button> : null}
+                {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setChatProbeScope("selected"); setChatProbeOpen(true); }}><ShieldAlert />{t("accounts.chatProbeAction")}</Button> : null}
                 <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
               </div>
             ) : (
@@ -814,6 +846,7 @@ export function AccountsPage() {
                 {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
+                {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setChatProbeScope(selected.size > 0 ? "selected" : "all"); setChatProbeOpen(true); }}><ShieldAlert />{t("accounts.chatProbeAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => { setCleanupStatuses(new Set()); setCleanupOpen(true); }}><Trash2 />{t("accounts.cleanupAction")}</Button> : null}
               </div>
             )}
@@ -1133,6 +1166,38 @@ export function AccountsPage() {
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.batchDeleteTitle", { count: selected.size })}</AlertDialogTitle><AlertDialogDescription>{t("accounts.deleteDescription")}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => batchDeleteMutation.mutate()}>{t("accounts.cleanupStart")}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={chatProbeOpen} onOpenChange={(open) => { if (!chatProbeMutation.isPending) setChatProbeOpen(open); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.chatProbeTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {chatProbeScope === "selected"
+                ? t("accounts.chatProbeSelectedDescription", { count: selected.size })
+                : t("accounts.chatProbeDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {chatProbeProgress ? (
+            <p className="text-xs text-muted-foreground">
+              {t("accounts.chatProbeProgress", { completed: chatProbeProgress.completed, total: chatProbeProgress.total })}
+            </p>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={chatProbeMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={chatProbeMutation.isPending || (chatProbeScope === "selected" && selected.size === 0)}
+              onClick={(event) => {
+                event.preventDefault();
+                chatProbeMutation.mutate(chatProbeScope);
+              }}
+            >
+              {chatProbeMutation.isPending ? <Spinner /> : null}
+              {t("accounts.chatProbeStart")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
