@@ -59,12 +59,15 @@ type Adapter struct {
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
-	httpClient := &http.Client{Transport: transport}
+	// Identity transport is the shared final boundary: CLI proxy requests always
+	// carry X-XAI-Token-Auth even if a future call site skips applyHeaders.
+	identity := &cliIdentityTransport{next: transport}
+	httpClient := &http.Client{Transport: identity}
 	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
 	// 进程生成一个随机 UUID，在进程生命周期内作为统一 Agent 身份。
 	agentID := uuid.NewString()
 	return &Adapter{
-		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
+		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: identity,
 		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher), logger: slog.Default(),
 	}
 }
@@ -634,11 +637,27 @@ func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, 
 
 func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential, accessToken, model, promptCacheKey string, trace bool) error {
 	cfg := a.config()
+	tokenAuth := strings.TrimSpace(cfg.TokenAuth)
+	if tokenAuth == "" {
+		tokenAuth = defaultGrokCLITokenAuth
+	}
+	clientVersion := strings.TrimSpace(cfg.ClientVersion)
+	if !isSupportedGrokCLIVersion(clientVersion) {
+		clientVersion = resolveGrokCLIVersion("")
+	}
+	clientIdentifier := strings.TrimSpace(cfg.ClientIdentifier)
+	if clientIdentifier == "" {
+		clientIdentifier = defaultGrokCLIClientIdentifier
+	}
+	userAgent := strings.TrimSpace(cfg.UserAgent)
+	if userAgent == "" {
+		userAgent = "grok-shell/" + clientVersion + " (linux; x86_64)"
+	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-XAI-Token-Auth", cfg.TokenAuth)
-	req.Header.Set("x-grok-client-version", cfg.ClientVersion)
-	req.Header.Set("x-grok-client-identifier", cfg.ClientIdentifier)
-	req.Header.Set("x-grok-client-mode", "headless")
+	req.Header.Set("X-XAI-Token-Auth", tokenAuth)
+	req.Header.Set("x-grok-client-version", clientVersion)
+	req.Header.Set("x-grok-client-identifier", clientIdentifier)
+	req.Header.Set("x-grok-client-mode", defaultGrokCLIClientMode)
 
 	if trace {
 		requestID := uuid.NewString()
@@ -679,7 +698,7 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "gzip")
-	req.Header.Set("User-Agent", cfg.UserAgent)
+	req.Header.Set("User-Agent", userAgent)
 	if model != "" {
 		req.Header.Set("x-grok-model-override", model)
 	}
