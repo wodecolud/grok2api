@@ -727,14 +727,10 @@ attemptLoop:
 				failureHandled = s.selector.MarkPaidQuotaExhausted(ctx, credential, lease.Billing)
 			}
 			if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
-				if credential.Provider == accountdomain.ProviderBuild {
-					// A Build account may lack permission for one chat model while its OAuth credential and video
-					// access remain valid. Isolate this denial to the model; reauthorization is needed only when the credential is rejected.
-					s.selector.MarkModelAccessDenied(ctx, credential, route.UpstreamModel, retryAfter)
-				} else {
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
-					s.selector.MarkQuotaStateChanged(credential.Provider)
-				}
+				// Chat-endpoint permission-denied is account-level entitlement failure for Build OAuth.
+				// Mark reauthRequired so the account leaves the pool and can be cleaned as invalid.
+				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
+				s.selector.MarkQuotaStateChanged(credential.Provider)
 				failureHandled = true
 			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
 				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
