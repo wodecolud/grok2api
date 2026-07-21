@@ -645,8 +645,7 @@ attemptLoop:
 			}
 			if response.StatusCode == http.StatusUnauthorized {
 				body, _ := readRetryableBody(response.Body)
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build OAuth credential rejected after refresh")
-				s.selector.MarkQuotaStateChanged(credential.Provider)
+				s.persistReauthRequired(ctx, credential, "Grok Build OAuth credential rejected after refresh")
 				lease.Release()
 				lastErr = fmt.Errorf("刷新后上游仍返回 401")
 				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, body, credential.ID, credential.Name)
@@ -658,6 +657,9 @@ attemptLoop:
 		if isRetryableResponse(response) && !finalEgressForbidden {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, _ := readRetryableBody(response.Body)
+			if len(body) == 0 && response.Diagnostic != nil && len(response.Diagnostic.Body) > 0 {
+				body = response.Diagnostic.Body
+			}
 			if egressForbidden {
 				// Web 403/code 7 means the browser session at the egress was rejected; the Provider rebuilt it and reduced node health, so do not penalize the account.
 				delete(excluded, credential.ID)
@@ -707,7 +709,9 @@ attemptLoop:
 				goto handleResponse
 			}
 			failureHandled := false
-			if freeBuildForbidden {
+			// Free Build 403s normally cool the account. Chat-endpoint entitlement denials are permanent:
+			// mark reauthRequired so cleanup can delete them instead of rotating forever.
+			if freeBuildForbidden && !lastFailure.PermanentAccountDenial {
 				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 				failureHandled = true
 			} else if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
@@ -726,15 +730,13 @@ attemptLoop:
 			} else if lastFailure.QuotaExhausted {
 				failureHandled = s.selector.MarkPaidQuotaExhausted(ctx, credential, lease.Billing)
 			}
-			if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
+			if lastFailure.PermanentAccountDenial {
 				// Chat-endpoint permission-denied is account-level entitlement failure for Build OAuth.
-				// Mark reauthRequired so the account leaves the pool and can be cleaned as invalid.
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
-				s.selector.MarkQuotaStateChanged(credential.Provider)
+				// Persist with a detached context so client disconnect cannot skip invalidation.
+				s.persistReauthRequired(ctx, credential, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
 				failureHandled = true
 			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
-				s.selector.MarkQuotaStateChanged(credential.Provider)
+				s.persistReauthRequired(ctx, credential, fmt.Sprintf("%s credential rejected", credential.Provider))
 				failureHandled = true
 			}
 			if lastFailure.AccountScoped && !failureHandled {
@@ -901,6 +903,12 @@ func (s *Service) markSSOCredentialRejected(ctx context.Context, credential acco
 	if credential.AuthType != accountdomain.AuthTypeSSO {
 		return
 	}
+	s.persistReauthRequired(ctx, credential, reason)
+}
+
+// persistReauthRequired writes reauthRequired with a detached timeout so request cancel
+// cannot leave chat permission-denied accounts active for cleanup.
+func (s *Service) persistReauthRequired(ctx context.Context, credential accountdomain.Credential, reason string) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
 	if err := s.accounts.MarkReauthRequired(writeCtx, credential.ID, reason); err != nil {

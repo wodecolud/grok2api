@@ -25,6 +25,10 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 			accountScoped: true, permanentAccountDenial: true, upstreamCode: "permission-denied",
 		},
 		{
+			name: "official chat credentials denial", body: `{"code":"permission-denied","error":"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please log into console.x.ai and update the permissions, or contact support."}`,
+			accountScoped: true, permanentAccountDenial: true, upstreamCode: "permission-denied",
+		},
+		{
 			name: "spending limit", body: `{"code":"personal-team-blocked:spending-limit","error":"quota exhausted"}`,
 			accountScoped: true, quotaExhausted: true, upstreamCode: "personal-team-blocked:spending-limit",
 		},

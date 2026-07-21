@@ -177,10 +177,19 @@ func isAccountScopedForbidden(text string) bool {
 }
 
 func isPermanentAccountDenial(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
 	if strings.Contains(text, "access to the chat endpoint is denied") {
 		return true
 	}
-	return strings.Trim(strings.TrimSpace(text), " .!\t\r\n") == "access denied"
+	// Official entitlement denial often ships code=permission-denied with the chat-credentials message.
+	if (strings.Contains(text, "permission-denied") || strings.Contains(text, "permission_denied")) &&
+		(strings.Contains(text, "chat endpoint") || strings.Contains(text, "correct credentials")) {
+		return true
+	}
+	return strings.Trim(text, " .!\t\r\n") == "access denied"
 }
 
 func isPaidQuotaExhaustion(text string) bool {
